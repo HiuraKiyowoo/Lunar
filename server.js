@@ -112,17 +112,23 @@ async function handleStream(req, res, u) {
     const s = raw && raw.stream;
     if (!s || !s.qualities) return json(res, 404, { error: 'stream tidak tersedia', raw });
 
-    // Ganti URL CDN → URL proxy server ini
+    // Ganti URL CDN → URL proxy server ini.
+    //
+    // PENTING: sumber menyertakan header Referer/Origin yang diminta CDN
+    // (mis. https://filmboom.top/). Header itu WAJIB diteruskan — kalau
+    // di-hardcode ke vidlink.pro, CDN menjawab 429.
     const qualities = {};
     for (const [q, v] of Object.entries(s.qualities)) {
-      const basic = !!(v.url && /\.mp4(\?|$)/i.test(v.url));
+      const hdr = v.headers || {};
+      const referer = hdr.referer || hdr.Referer || null;
+      const origin = hdr.origin || hdr.Origin || null;
       qualities[q] = {
         label: q + 'p',
         type: v.type || 'mp4',
         codec: v.codecName || null,
         size: v.size ? Number(v.size) : null,
         sizeText: v.size ? humanSize(Number(v.size)) : null,
-        url: '/v/' + cdn.register(v.url, 'https://vidlink.pro/'),
+        url: '/v/' + cdn.register(v.url, referer, origin),
       };
     }
 

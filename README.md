@@ -30,6 +30,12 @@ Client (APK / web)
   dijalankan di HP.
 - **CDN menolak akses langsung** (428/403/429 Cloudflare). Backend yang
   mengakses CDN, jadi IP server yang dipakai — bukan IP pengguna.
+- **Header Referer/Origin ditentukan oleh sumber**, bukan oleh kita. Respons
+  VidLink sudah menyertakan header yang benar per-kualitas (mis. referer
+  `https://filmboom.top/`). Server meneruskan header itu apa adanya — inilah
+  sebabnya video bisa diputar **tanpa WebView, tanpa cookie, tanpa ExoPlayer
+  khusus**. Header ini berubah bila sumber berganti, jadi harus selalu
+  dibaca dari respons (tidak boleh di-hardcode).
 - **Satu titik ubah**: kalau sumber stream berubah, cukup perbaiki server.
   Client tidak perlu di-update, cukup arahkan DNS.
 
@@ -212,8 +218,11 @@ curl 'https://lunar.zone.id/stream?tmdb=550&type=movie'
 - **`wasm/fu.wasm` (2,4 MB) wajib ada.** Tanpa berkas ini `/stream` gagal
   (`token null`). Jangan dihapus meski terlihat asing.
 - **`/v/<id>` wajib dipakai** — CDN video menolak akses langsung (428/403/429).
-- Muncul **`429`**? IP server kelewat sering mengakses. Tunggu beberapa menit
-  atau kurangi frekuensi.
+- **Muncul `429`?** Hampir selalu karena Referer/Origin tidak sesuai dengan yang
+  diminta sumber, **bukan** karena IP diblokir. Cek `/stream?debug=1` lalu lihat
+  `_raw.stream.qualities.<q>.headers`. Jangan menambal dengan hardcode
+  `vidlink.pro` — sumbernya berganti-ganti (`filmboom.top` pada pengujian
+  terakhir).
 - Server ini **tidak menyimpan berkas video**; semua media dari pihak ketiga.
 
 ---
@@ -225,7 +234,8 @@ curl 'https://lunar.zone.id/stream?tmdb=550&type=movie'
 | `/health` gagal | server mati → `systemctl restart lunar` |
 | `/stream` → `token null` | WASM gagal → cek `node -v` ≥ 18 dan `wasm/fu.wasm` ada |
 | `/stream` → `stream tidak tersedia` | id TMDB salah / judul tak ada di sumber |
-| `/v/...` → 429 | IP diblokir sementara Cloudflare → tunggu |
+| `/v/...` → 429 | Referer/Origin tidak cocok dengan `_raw...qualities[].headers` → pastikan server meneruskan header dari respons |
+| `/v/...` → 403/428 | Referer kosong → sumber tidak mengirim header; pakai fallback `https://vidlink.pro/` |
 | `/s/....vtt` → 404 | URL subtitle kedaluwarsa → minta `/stream` lagi |
 | Server tak bisa diakses dari luar | cek firewall (ufw) & forwarding port |
 

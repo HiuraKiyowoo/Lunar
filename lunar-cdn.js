@@ -1,12 +1,15 @@
 /**
  * lunar-cdn.js — proxy video + subtitle.
  *
- * KENYATAAN (hasil uji langsung):
- *  • CDN (bcdn.hakunaymatata.com / noon.mooncase.online) menolak akses langsung:
- *      428 Forbidden  → tanpa Referer
- *      429            → terlalu sering (rate limit Cloudflare)
- *  • Perlu: Referer https://vidlink.pro/ + cookie CloudFront (dari player)
- *  • MP4 biasa TIDAK perlu cookie; cukup Referer + IP yang tidak diblokir.
+ * KUNCI (hasil uji langsung, TERBUKTI 200 OK):
+ *  • Respons API vidlink MENYERTAKAN header yang benar per-kualitas:
+ *        "headers": { "referer": "https://filmboom.top/", "origin": "https://filmboom.top" }
+ *    Sumbernya berganti-ganti (filmboom.top, vidlink.pro, ...), jadi header
+ *    TIDAK BOLEH di-hardcode — harus diambil dari respons tersebut.
+ *  • CDN menolak (429 halaman Cloudflare) bila Referer/Origin salah, walau
+ *    User-Agent sudah ala Chrome, HTTP/2 aktif, atau TLS di-impersonate.
+ *  • Header di API tak ada (kasus lama) → pakai fallback referer vidlink.pro.
+ *  • Tidak perlu cookie CloudFront untuk MP4; cukup Referer + Origin yang tepat.
  *
  * Jadi server ini WAJIB jadi proxy: HP minta /v/<id>, server ambil dari CDN
  * dengan header yang benar, lalu teruskan (termasuk Range agar seek jalan).
@@ -20,8 +23,12 @@ const { URL } = require('url');
 
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
+/** Referer bawaan bila sumber tidak menyertakan header sendiri. */
+const DEFAULT_REFERER = 'https://vidlink.pro/';
+const DEFAULT_ORIGIN = 'https://vidlink.pro';
+
 /** Menyimpan URL asli per-id sementara (TTL 1 jam). */
-const videoMap = new Map();   // id -> {url, referer, expires}
+const videoMap = new Map();   // id -> {url, referer, origin, expires}
 const subMap = new Map();     // id -> {url}
 
 /** Bikin id pendek dari URL. */
@@ -29,10 +36,21 @@ function hash(url) {
   return crypto.createHash('sha1').update(url).digest('hex').slice(0, 20);
 }
 
-/** Daftarkan URL video → balikin id untuk proxy. */
-function register(url, referer) {
+/**
+ * Daftarkan URL video → balikin id untuk proxy.
+ *
+ * @param {string} url     URL CDN asli
+ * @param {string} referer Referer yang diminta sumber (mis. https://filmboom.top/)
+ * @param {string} origin  Origin yang diminta sumber
+ */
+function register(url, referer, origin) {
   const id = hash(url);
-  videoMap.set(id, { url, referer: referer || 'https://vidlink.pro/', expires: Date.now() + 3600_000 });
+  videoMap.set(id, {
+    url,
+    referer: referer || DEFAULT_REFERER,
+    origin: origin || DEFAULT_ORIGIN,
+    expires: Date.now() + 3600_000,
+  });
   return id;
 }
 
@@ -53,25 +71,18 @@ function lookup(id) {
  * Stream dari CDN ke response klien.
  * Meneruskan Range + semua header penting.
  *
- * Tahan 429/403: coba beberapa set header (Cloudflare kadang hanya melihat
- * kombinasi Referer+Origin tertentu), beri jeda kecil antar percobaan.
+ * Referer/Origin diambil dari yang diminta sumber (entry.referer/entry.origin).
+ * Ini yang menentukan 200 vs 429 — bukan User-Agent atau TLS.
  */
 function pipeVideo(req, res, entry, attempt = 0) {
   const target = new URL(entry.url);
-
-  // Variasi header: lama-lama makin "mirip browser asli"
-  const variants = [
-    { Referer: entry.referer || 'https://vidlink.pro/', Origin: 'https://vidlink.pro' },
-    { Referer: 'https://vidlink.pro/', Origin: 'https://vidlink.pro', 'Sec-Fetch-Dest': 'video', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Site': 'cross-site' },
-    { Referer: 'https://vidlink.pro/', Origin: 'https://vidlink.pro', 'Accept-Encoding': 'identity;q=1, *;q=0', 'Accept-Language': 'en-US,en;q=0.9' },
-  ];
-  const v = variants[Math.min(attempt, variants.length - 1)];
 
   const headers = {
     'User-Agent': UA,
     'Accept': '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
-    ...v,
+    'Referer': entry.referer || DEFAULT_REFERER,
+    'Origin': entry.origin || DEFAULT_ORIGIN,
   };
   if (req.headers.range) headers['Range'] = req.headers.range;
   if (entry.cookie) headers['Cookie'] = entry.cookie;
@@ -86,11 +97,11 @@ function pipeVideo(req, res, entry, attempt = 0) {
       headers,
     },
     (up) => {
-      // CDN sibuk (429/403/5xx) → coba lagi dengan header lain
-      const retryable = up.statusCode === 429 || up.statusCode === 403 || up.statusCode >= 500;
-      if (retryable && attempt < 3) {
+      // CDN sibuk (429/5xx) → tunggu sejenak lalu coba lagi sekali-dua kali
+      const retryable = up.statusCode === 429 || up.statusCode >= 500;
+      if (retryable && attempt < 2) {
         up.resume(); // buang body
-        return setTimeout(() => pipeVideo(req, res, entry, attempt + 1), 400 * (attempt + 1));
+        return setTimeout(() => pipeVideo(req, res, entry, attempt + 1), 500 * (attempt + 1));
       }
 
       if (up.statusCode !== 200 && up.statusCode !== 206) {
