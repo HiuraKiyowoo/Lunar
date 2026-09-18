@@ -30,12 +30,19 @@ Client (APK / web)
   dijalankan di HP.
 - **CDN menolak akses langsung** (428/403/429 Cloudflare). Backend yang
   mengakses CDN, jadi IP server yang dipakai — bukan IP pengguna.
-- **Header Referer/Origin ditentukan oleh sumber**, bukan oleh kita. Respons
-  VidLink sudah menyertakan header yang benar per-kualitas (mis. referer
-  `https://filmboom.top/`). Server meneruskan header itu apa adanya — inilah
-  sebabnya video bisa diputar **tanpa WebView, tanpa cookie, tanpa ExoPlayer
-  khusus**. Header ini berubah bila sumber berganti, jadi harus selalu
-  dibaca dari respons (tidak boleh di-hardcode).
+- **Semua media lewat perantara `noon.mooncase.online`.** CDN
+  (`bcdn*.hakunaymatata.com`) menolak akses langsung: `428` tanpa Referer,
+  `429` dengan Referer. Player VidLink sendiri tidak pernah menyentuh CDN —
+  ia memakai perantara:
+  ```
+  /mp/<path>?sign=&t=&headers=<json>&host=<cdn>    (mp4)
+  /sacdn/<path>?host=&sc=<base64 cookie>           (dash/hls)
+  ```
+  Perantara itulah yang membuat tanda tangan CloudFront (`sc`).
+  Algoritmanya disalin di `lunar-vidlink-transform.js` (dari modul webpack 5196).
+- **`headers={}` → `428 Forbidden`.** Parameter `headers` pada URL `/mp/` wajib
+  berisi sesuatu (mis. `{"Referer":"https://vidlink.pro/"}`). Server mengisinya
+  otomatis bila sumber mengirim objek kosong.
 - **Satu titik ubah**: kalau sumber stream berubah, cukup perbaiki server.
   Client tidak perlu di-update, cukup arahkan DNS.
 
@@ -218,11 +225,9 @@ curl 'https://lunar.zone.id/stream?tmdb=550&type=movie'
 - **`wasm/fu.wasm` (2,4 MB) wajib ada.** Tanpa berkas ini `/stream` gagal
   (`token null`). Jangan dihapus meski terlihat asing.
 - **`/v/<id>` wajib dipakai** — CDN video menolak akses langsung (428/403/429).
-- **Muncul `429`?** Hampir selalu karena Referer/Origin tidak sesuai dengan yang
-  diminta sumber, **bukan** karena IP diblokir. Cek `/stream?debug=1` lalu lihat
-  `_raw.stream.qualities.<q>.headers`. Jangan menambal dengan hardcode
-  `vidlink.pro` — sumbernya berganti-ganti (`filmboom.top` pada pengujian
-  terakhir).
+- **Muncul `429`?** Halaman nginx `429 Too Many Requests` (587 byte) berarti
+  **alamat/IP terlalu sering mengakses** — tunggu beberapa menit. Ini bukan
+  tanda header salah: header salah memberi `428` (14 byte).
 - Server ini **tidak menyimpan berkas video**; semua media dari pihak ketiga.
 
 ---

@@ -1,18 +1,19 @@
 /**
  * lunar-cdn.js — proxy video + subtitle.
  *
- * KUNCI (hasil uji langsung, TERBUKTI 200 OK):
- *  • Respons API vidlink MENYERTAKAN header yang benar per-kualitas:
- *        "headers": { "referer": "https://filmboom.top/", "origin": "https://filmboom.top" }
- *    Sumbernya berganti-ganti (filmboom.top, vidlink.pro, ...), jadi header
- *    TIDAK BOLEH di-hardcode — harus diambil dari respons tersebut.
- *  • CDN menolak (429 halaman Cloudflare) bila Referer/Origin salah, walau
- *    User-Agent sudah ala Chrome, HTTP/2 aktif, atau TLS di-impersonate.
- *  • Header di API tak ada (kasus lama) → pakai fallback referer vidlink.pro.
- *  • Tidak perlu cookie CloudFront untuk MP4; cukup Referer + Origin yang tepat.
- *
- * Jadi server ini WAJIB jadi proxy: HP minta /v/<id>, server ambil dari CDN
- * dengan header yang benar, lalu teruskan (termasuk Range agar seek jalan).
+ * KUNCI (hasil bedah kode player VidLink + uji langsung):
+ *  · CDN (bcdn*.hakunaymatata.com, cacdn...) MENOLAK akses langsung:
+ *        428 Forbidden  → tanpa Referer
+ *        429            → dengan Referer (blokir nginx, badannya 587 byte)
+ *  · Kesimpulan: CDN ini memang tidak boleh diakses langsung dari luar.
+ *    Seluruh permintaan media harus lewat perantara noon.mooncase.online
+ *    (/mp/... atau /sacdn/... + tanda tangan CloudFront "sc" yang dibuat
+ *    perantara tersebut). Transformasinya ada di lunar-vidlink-transform.js.
+ *  · Untuk perantara itu header yang benar adalah:
+ *        Referer: https://vidlink.pro/
+ *    (Bukan filmboom.top — percobaan dengan nilai itu justru 429.)
+ *  · Modul ini meneruskan permintaan ke URL yang sudah disiapkan server,
+ *    termasuk Range agar seek berfungsi.
  */
 'use strict';
 

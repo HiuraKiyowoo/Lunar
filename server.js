@@ -17,10 +17,63 @@ const path = require('path');
 
 const wasm = require('./lunar-wasm.js');
 const cdn = require('./lunar-cdn.js');
+const transform = require('./lunar-vidlink-transform.js');
 
 const PORT = process.env.PORT || 3000;
 const MZ = 'https://moviezone.web.id';
+/**
+ * Perantara VidLink. CDN video (bcdn*.hakunaymatata.com) menolak akses
+ * langsung (428/429); hanya perantara ini yang boleh mengaksesnya karena
+ * ia membuat sendiri tanda tangan CloudFront (sc / cookie).
+ */
+const VIDEO_PROXY = process.env.VIDEO_PROXY || 'https://noon.mooncase.online/';
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+
+/* ---------------------------------------------------------------- utils ---- */
+
+/**
+ * Ubah satu URL media (hasil transform) menjadi URL proxy server ini.
+ *
+ * Ada dua kemungkinan bentuk:
+ *   a. URL perantara noon.mooncase.online (/mp/... atau /sacdn/...)
+ *      → didaftarkan di lunar-cdn.js agar diteruskan lewat /v/<id>.
+ *      Referer tetap WAJIB https://vidlink.pro/ (bukan filmboom.top).
+ *   b. URL CDN langsung (bcdn*.hakunaymatata.com)
+ *      → tidak bisa dipakai; ditandai agar klien tahu (dikembalikan apa adanya).
+ *
+ * @param {string} url      URL hasil transform
+ * @param {Function} register fungsi register dari lunar-cdn.js
+ */
+function proxyify(url, register) {
+  if (!url) return null;
+
+  // Perantara noon.mooncase.online menolak permintaan tanpa header yang jelas:
+  //   headers={}                  → 428 Forbidden (14 byte)
+  //   headers={"Referer": "..."}  → lanjut (diteruskan ke CDN)
+  // Jadi parameter `headers` di query WAJIB berisi Referer vidlink.
+  let fixed = url;
+  try {
+    const u = new URL(url);
+    const cur = u.searchParams.get('headers');
+    const isEmpty = !cur || cur === '{}' || cur === '';
+    if (isEmpty && /\/mp\//.test(u.pathname)) {
+      u.searchParams.set('headers', JSON.stringify({ Referer: 'https://vidlink.pro/' }));
+      fixed = u.toString();
+    }
+  } catch (_) { /* URL relatif / tak terduga → pakai apa adanya */ }
+
+  return '/v/' + register(fixed, 'https://vidlink.pro/', 'https://vidlink.pro');
+}
+
+function humanSize(n) {
+  if (!n || n <= 0) return null;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  const num = v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1);
+  return `${num} ${units[i]}`;
+}
 
 /* ---------------------------------------------------------------- cache ---- */
 const cache = new Map(); // key -> {body, type, exp}
@@ -112,52 +165,52 @@ async function handleStream(req, res, u) {
     const s = raw && raw.stream;
     if (!s || !s.qualities) return json(res, 404, { error: 'stream tidak tersedia', raw });
 
-    // Ganti URL CDN → URL proxy server ini.
+    // Ubah URL CDN → URL yang benar-benar bisa diputar.
     //
-    // PENTING: sumber menyertakan header Referer/Origin yang diminta CDN
-    // (mis. https://filmboom.top/). Header itu WAJIB diteruskan — kalau
-    // di-hardcode ke vidlink.pro, CDN menjawab 429.
+    // KUNCI (hasil bedah kode player + uji langsung):
+    //  · CDN (bcdn*.hakunaymatata.com) MENOLAK akses langsung → 428 tanpa
+    //    Referer, 429 dengan Referer (blokir nginx).
+    //  · Player VidLink TIDAK PERNAH menyentuh CDN langsung. Semua permintaan
+    //    media lewat perantara noon.mooncase.online:
+    //        /mp/<path>?sign=&t=&headers=<json>&host=<cdn>   (mp4)
+    //        /sacdn/<path>?host=&sc=<base64 cookie>          (dash/hls)
+    //  · Perantara itulah yang membuat tanda tangan CloudFront (sc).
+    //    Algoritmanya sudah disalin ke lunar-vidlink-transform.js.
+    const transformed = transform.D(raw, VIDEO_PROXY);
+    const ts = (transformed && transformed.stream) || s;
+
     const qualities = {};
-    for (const [q, v] of Object.entries(s.qualities)) {
-      const hdr = v.headers || {};
-      const referer = hdr.referer || hdr.Referer || null;
-      const origin = hdr.origin || hdr.Origin || null;
+    for (const [q, v] of Object.entries(ts.qualities || {})) {
       qualities[q] = {
         label: q + 'p',
         type: v.type || 'mp4',
         codec: v.codecName || null,
         size: v.size ? Number(v.size) : null,
         sizeText: v.size ? humanSize(Number(v.size)) : null,
-        url: '/v/' + cdn.register(v.url, referer, origin),
+        url: proxyify(v.url, cdn.register),
       };
     }
 
     // Subtitle
-    const captions = (s.captions || []).map((c) => ({
+    const captions = (ts.captions || []).map((c) => ({
       language: c.language,
       url: '/s/' + cdn.registerSub(c.url) + '.vtt',
     }));
 
     const out = {
       sourceId: raw.sourceId || null,
-      type: s.type || 'file',
+      type: ts.type || s.type || 'file',
       ttl: s.TTL || 3600,
       qualities,
       captions,
       // berkas mentah tetap dikirim untuk debug (bisa dimatikan dgn ?debug=0)
-      _raw: u.searchParams.get('debug') === '1' ? s : undefined,
+      _raw: u.searchParams.get('debug') === '1' ? ts : undefined,
     };
     cacheSet(key, JSON.stringify(out), 'application/json');
     json(res, 200, out);
   } catch (e) {
     json(res, 500, { error: e.message });
   }
-}
-
-function humanSize(b) {
-  if (b > 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
-  if (b > 1048576) return Math.round(b / 1048576) + ' MB';
-  return Math.round(b / 1024) + ' KB';
 }
 
 /* --------------------------------------------------------- route: video ---- */
