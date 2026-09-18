@@ -19,6 +19,7 @@ const wasm = require('./lunar-wasm.js');
 const cdn = require('./lunar-cdn.js');
 const transform = require('./lunar-vidlink-transform.js');
 const play = require('./lunar-play.js');
+const hls = require('./lunar-hls.js');
 
 const PORT = process.env.PORT || 3000;
 const MZ = 'https://moviezone.web.id';
@@ -30,7 +31,7 @@ const MZ = 'https://moviezone.web.id';
 const VIDEO_PROXY = process.env.VIDEO_PROXY || 'https://noon.mooncase.online/';
 
 /** Penanda versi — berguna untuk memastikan server sudah di-restart. */
-const VERSION = '4.0-play';
+const VERSION = '5.0-hls';
 
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
@@ -216,24 +217,55 @@ async function handleStreamPlay(req, res, u, tmdb, type, season, episode) {
 
   try {
     const hit = await play.extract(tmdb, type, season, episode, { force, engines: only });
+
+    // Bentuk URL untuk perangkat.
+    //
+    //  · HLS (.m3u8) — jalur utama. Play-list berisi URI turunan yang hanya
+    //    dilayani untuk sesi browser yang benar. Karena itu semuanya dialihkan
+    //    lewat proxy HLS di server ini (lunar-hls.js) yang menyertakan cookie
+    //    sesi Chromium dan menulis ulang tiap URI. Segmen videonya sendiri ada
+    //    di nebula.bright67.online — diuji 200 video/mp4 dari IP datacenter,
+    //    jadi tidak ada blokir dan tidak ada tanda tangan yang kedaluwarsa.
+    //
+    //  · Selain HLS (.mp4 bertanda tangan) — lewat proxy video biasa (/v/).
+    //    Ini pemutar VidLink; tanda tangannya cepat tua (428) dan CDN-nya
+    //    menolak IP datacenter, tetapi tetap disediakan sebagai cadangan.
+    const isHls = /\.m3u8(\?|$)/i.test(hit.url) || /\/api\/playlist\//i.test(hit.url);
+    const ref = (hit.headers && (hit.headers.referer || hit.headers.Referer)) || '';
+    const origin = ref ? ref.replace(/\/$/, '') : '';
+    const cookie = hit.cookie || '';
+
+    let proxied, kind, note;
+    if (isHls) {
+      proxied = '/v/' + hls.register({ url: hit.url, referer: ref || 'https://cinesrc.st/', cookie });
+      kind = 'hls';
+      note = 'HLS lewat proxy server (URI ditulis ulang, cookie sesi disertakan)';
+    } else {
+      proxied = '/v/' + cdn.register(hit.url, ref || 'https://vidlink.pro/', origin || 'https://vidlink.pro');
+      kind = 'mp4';
+      note = 'mp4 lewat proxy server';
+    }
+
     const out = {
       sourceId: hit.engine,
-      type: 'file',
+      type: kind === 'hls' ? 'hls' : 'file',
       ttl: Number(process.env.PW_TTL || 3_000),
       live: true,
+      kind,
+      note,
       adBlocked: hit.adBlocked || 0,
       cached: Boolean(hit.cached),
       qualities: {
         auto: {
           label: 'auto',
-          type: /\.m3u8/.test(hit.url) ? 'hls' : 'mp4',
+          type: kind,
           codec: null,
           size: null, sizeText: null,
-          // URL apa adanya dari pemutar. Perangkat (IP seluler/rumah) yang
-          // mengunduh; server tidak menyentuh video sama sekali.
-          url: hit.url,
-          headers: hit.headers || {},
-          directUrl: null,
+          // URL lewat server sendiri — inilah yang dipakai APK.
+          url: proxied,
+          headers: {},
+          // URL asli pemutar, untuk debug.
+          directUrl: hit.url,
         },
       },
       captions: [],
@@ -385,6 +417,7 @@ const server = http.createServer(async (req, res) => {
       videos: cdn.videoMap.size, subs: cdn.subMap.size,
       proxy: VIDEO_PROXY,
       play: play.stats(),
+      hls: hls.stats(),
       ts: new Date().toISOString(),
     });
   }
@@ -392,8 +425,14 @@ const server = http.createServer(async (req, res) => {
   // stream resolver
   if (p === '/stream') return handleStream(req, res, u);
 
-  // proxy video & subtitle
-  if (p.startsWith('/v/')) return handleVideo(req, res, p.slice(3));
+  // proxy video & subtitle.
+  // HLS (lunar-hls.js) diperiksa lebih dulu: id-nya juga 20 karakter, jadi
+  // tanpa urutan ini permintaan play-list bisa jatuh ke proxy video biasa.
+  if (p.startsWith('/v/')) {
+    const id = p.slice(3);
+    if (hls.lookup(id) || hls.map.size) return hls.serve(req, res, id);
+    return handleVideo(req, res, id);
+  }
   if (p.startsWith('/s/')) return handleSub(req, res, p.slice(3).replace(/\.vtt$/, ''));
 
   // sisa → teruskan ke MovieZone

@@ -2,12 +2,17 @@
   "name": "lunar-server",
   "version": "1.0.0",
   "private": true,
-  "description": "Lunar backend — katalog MovieZone + resolver & proxy stream VidLink (tanpa WebView)",
+  "description": "Lunar backend \u2014 katalog MovieZone + resolver & proxy stream VidLink (tanpa WebView)",
   "main": "server.js",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "optionalDependencies": {
+    "playwright": "^1.63.0"
+  }
 }

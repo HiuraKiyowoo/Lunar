@@ -30,17 +30,20 @@ const path = require('path');
 /* ------------------------------------------------------------- setelan ----- */
 
 const NAV_TIMEOUT = Number(process.env.PW_NAV_TIMEOUT || 60_000);
-const WAIT_MEDIA = Number(process.env.PW_WAIT_MEDIA || 30_000);
+const WAIT_MEDIA = Number(process.env.PW_WAIT_MEDIA || 45_000);
 const TTL = Number(process.env.PW_TTL || 3_000);          // umur cache (detik)
 const LAUNCH_TIMEOUT = Number(process.env.PW_LAUNCH_TIMEOUT || 30_000);
 
 const UA = process.env.PW_UA
-  || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36';
+  || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
 
 /** Pemutar cadangan, berurutan. */
 const ENGINES = [
-  { name: 'VidLink',    url: (id, tv, s, e) => tv ? `https://vidlink.pro/tv/${id}/${s}/${e}` : `https://vidlink.pro/movie/${id}` },
+  // VidSrcWiki DIUTAMAKAN: pemutarnya (cinesrc.st) memakai HLS — tanpa tanda
+  // tangan, tanpa Cloudflare, segmennya di nebula.bright67.online yang tidak
+  // memblokir IP datacenter. Diuji: 200 video/mp4 dari VPS.
   { name: 'VidSrcWiki', url: (id, tv, s, e) => tv ? `https://vidsrc.wiki/embed/tv/${id}/${s}/${e}` : `https://vidsrc.wiki/embed/movie/${id}` },
+  { name: 'VidLink',    url: (id, tv, s, e) => tv ? `https://vidlink.pro/tv/${id}/${s}/${e}` : `https://vidlink.pro/movie/${id}` },
   { name: 'VidSrc',     url: (id, tv, s, e) => tv ? `https://vidsrc.to/embed/tv/${id}/${s}/${e}` : `https://vidsrc.to/embed/movie/${id}` },
   { name: '2Embed',     url: (id, tv, s, e) => tv ? `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}` : `https://www.2embed.cc/embed/${id}` },
   { name: 'SuperEmbed', url: (id, tv, s, e) => tv ? `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}` : `https://multiembed.mov/?video_id=${id}&tmdb=1` },

@@ -13,3 +13,5 @@ play-cache.json
 extract-cache.json
 sc-cache.json
 sc-cache.json
+
+package-lock.json
