@@ -33,7 +33,13 @@ const UA = process.env.HLS_UA
   || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36';
 
 const MAX_HOPS = 4;               // kedalaman play-list (master → varian → …)
-const TTL = Number(process.env.HLS_TTL || 3600);
+
+/** Batas jumlah entri; play-list panjang (799 segmen) cepat memenuhi memori. */
+const MAX_ENTRIES = Number(process.env.HLS_MAX || 200_000);
+// Entri HLS berumur panjang: film bisa 2+ jam dan pemutar boleh di-pause lama.
+// Kalau entri kedaluwarsa saat playback berjalan, permintaan segmen berikutnya
+// akan gagal. 6 jam memberi ruang aman.
+const TTL = Number(process.env.HLS_TTL || 21_600);
 
 /** id → { url, referer, cookie, base, expires } */
 const map = new Map();
@@ -68,6 +74,11 @@ function lookup(id) {
 function gc() {
   const now = Date.now();
   for (const [k, v] of map) if (v.expires < now) map.delete(k);
+  if (map.size > MAX_ENTRIES) {
+    // buang yang paling tua sampai di bawah batas
+    const keys = [...map.entries()].sort((a, b) => a[1].expires - b[1].expires);
+    for (let i = 0; i < keys.length - MAX_ENTRIES + 1000; i++) map.delete(keys[i][0]);
+  }
 }
 
 /* ------------------------------------------------------------ pengambilan -- */
@@ -128,27 +139,36 @@ function isPlaylist(body, headers) {
  * kembali ke server ini, sambil mewarisi konteks sesi.
  */
 function rewritePlaylist(text, absBase, ctx) {
+  // Semua URI diarahkan ke server ini sebagai path RELATIF.
+  //  · Relatif penting: kalau absolut, pemutar yang menormalkan URL bisa
+  //    membuang query dan meminta langsung ke sumber (yang menjawab 400).
+  //  · Ekstensi dipertahankan (.m3u8 / .mp4 / .ts) supaya pemutar tahu
+  //    jenis isinya — segmen sumber dikirim sebagai image/jpeg walau berisi
+  //    fMP4, dan ExoPlayer menolak kalau ekstensinya menyesatkan.
   const out = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trimEnd();
 
     if (!line.trim()) { out.push(line); continue; }
 
+    const toLocal = (uri) => {
+      const abs = toAbsolute(uri, absBase);
+      const id = register({ url: abs, referer: ctx.referer, cookie: ctx.cookie });
+      // tentukan ekstensi
+      let ext = '.m3u8';
+      const m = abs.match(/\.(m3u8|mp4|ts|m4s|jpg|key)(\?|$)/i);
+      if (m) ext = m[0].split('?')[0].toLowerCase();
+      if (ext === '.jpg' || ext === '.m4s') ext = '.mp4';
+      if (ext === '.key') ext = '.bin';
+      return `/v/${id}${ext}`;
+    };
+
     if (line.startsWith('#')) {
-      // Tag yang mengandung URI: #EXT-X-MAP:URI="...", #EXT-X-KEY:URI="...",
-      // #EXT-X-MEDIA:URI="...", #EXT-X-I-FRAME-STREAM-INF:URI="..."
-      out.push(line.replace(/URI="([^"]+)"/g, (_m, uri) => {
-        const abs = toAbsolute(uri, absBase);
-        const id = register({ url: abs, referer: ctx.referer, cookie: ctx.cookie });
-        return `URI="${abs}${abs.includes('?') ? '&' : '?'}__l=${id}"`;
-      }));
+      out.push(line.replace(/URI="([^"]+)"/g, (_m, uri) => `URI="${toLocal(uri)}"`));
       continue;
     }
 
-    // baris biasa = URI segmen atau play-list turunan
-    const abs = toAbsolute(line, absBase);
-    const id = register({ url: abs, referer: ctx.referer, cookie: ctx.cookie });
-    out.push(`${abs}${abs.includes('?') ? '&' : '?'}__l=${id}`);
+    out.push(toLocal(line));
   }
   return out.join('\n');
 }
@@ -172,19 +192,22 @@ function hasUris(text) {
  * Server mengenali hal itu dari ketiadaan id di peta, lalu mengambil dengan
  * header yang benar — jadi pemutar tetap meminta ke server ini.
  */
-async function serve(req, res, id) {
+async function serve(req, res, id, ext) {
   gc();
 
   // 1) id terdaftar → ini play-list
   let entry = lookup(id);
   if (entry) {
-    return servePlaylist(req, res, entry);
+    // Perpanjang umur tiap kali dipakai: selama pemutar masih meminta segmen,
+    // entri tidak boleh kedaluwarsa di tengah playback.
+    entry.expires = Date.now() + TTL * 1000;
+    return servePlaylist(req, res, entry, ext);
   }
 
   // 2) id tidak dikenal → pemutar mungkin meminta URL segmen yang sudah
   //    ditulis ulang; cari entri yang cocok lewat daftar (fallback aman).
   const found = findByUrl(id);
-  if (found) return servePlaylist(req, res, found);
+  if (found) return servePlaylist(req, res, found, ext);
 
   return head(res, 404, { 'Content-Type': 'text/plain' }, 'id tidak dikenal');
 }
@@ -200,7 +223,7 @@ function findByUrl(id) {
   return null;
 }
 
-async function servePlaylist(req, res, entry) {
+async function servePlaylist(req, res, entry, ext) {
   let up;
   try {
     up = await fetchAll(entry.url, entry, { range: req.headers.range });
@@ -215,8 +238,16 @@ async function servePlaylist(req, res, entry) {
 
   // Segmen video: teruskan apa adanya (jangan diubah — isinya biner).
   if (!isPlaylist(up.body, up.headers)) {
+    // Sumber memberi segmen sebagai image/jpeg padahal isinya fMP4 (styp).
+    // ExoPlayer menolak kalau jenis isi salah, jadi periksa isinya.
+    let ct = up.headers['content-type'] || 'video/mp4';
+    const magic = up.body.slice(0, 12).toString('latin1');
+    if (magic.includes('ftyp') || magic.includes('styp') || /\.(ts|m4s|mp4)$/i.test(ext || '')) {
+      ct = /styp|ftyp/.test(magic) ? 'video/mp4' : ct;
+    }
+    if (ext === '.ts') ct = 'video/mp2t';
     const h = {
-      'Content-Type': up.headers['content-type'] || 'video/mp4',
+      'Content-Type': ct,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
       'Cache-Control': 'public, max-age=3600',

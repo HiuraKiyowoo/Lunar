@@ -429,8 +429,12 @@ const server = http.createServer(async (req, res) => {
   // HLS (lunar-hls.js) diperiksa lebih dulu: id-nya juga 20 karakter, jadi
   // tanpa urutan ini permintaan play-list bisa jatuh ke proxy video biasa.
   if (p.startsWith('/v/')) {
-    const id = p.slice(3);
-    if (hls.lookup(id) || hls.map.size) return hls.serve(req, res, id);
+    // Pemutar (Chrome/VLC/ExoPlayer) sering menebak jenis isi dari ekstensi.
+    // Terima /v/<id>.m3u8 dan /v/<id>.mp4 lalu buang ekstensinya.
+    let id = p.slice(3);
+    const ext = (id.match(/\.(m3u8|mp4|ts|m4s|jpg)$/i) || [])[0];
+    if (ext) id = id.slice(0, -ext.length);
+    if (hls.lookup(id) || hls.map.size) return hls.serve(req, res, id, ext);
     return handleVideo(req, res, id);
   }
   if (p.startsWith('/s/')) return handleSub(req, res, p.slice(3).replace(/\.vtt$/, ''));
