@@ -8,3 +8,8 @@ cache/
 # os
 .DS_Store
 Thumbs.db
+
+play-cache.json
+extract-cache.json
+sc-cache.json
+sc-cache.json

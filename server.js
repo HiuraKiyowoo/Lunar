@@ -18,6 +18,7 @@ const path = require('path');
 const wasm = require('./lunar-wasm.js');
 const cdn = require('./lunar-cdn.js');
 const transform = require('./lunar-vidlink-transform.js');
+const play = require('./lunar-play.js');
 
 const PORT = process.env.PORT || 3000;
 const MZ = 'https://moviezone.web.id';
@@ -29,7 +30,7 @@ const MZ = 'https://moviezone.web.id';
 const VIDEO_PROXY = process.env.VIDEO_PROXY || 'https://noon.mooncase.online/';
 
 /** Penanda versi — berguna untuk memastikan server sudah di-restart. */
-const VERSION = '3.0-perantara';
+const VERSION = '4.0-play';
 
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
@@ -197,6 +198,52 @@ async function handleMovieZone(req, res, u) {
 }
 
 /* -------------------------------------------------------- route: stream ---- */
+/**
+ * Jalur alternatif: buka halaman pemutar dengan Chromium sungguhan
+ * (lunar-play.js) lalu pakai URL video yang tertangkap.
+ *
+ * Dipakai ketika `sign`/`t` dari API sudah kedaluwarsa (428/429) atau ketika
+ * pemutar memilih jalur yang tidak bisa ditiru dari luar. Pengiklan diblokir
+ * di tingkat jaringan, jadi iklan tidak pernah ikut terbawa.
+ *
+ *   /stream?tmdb=550&engine=play            → pemutar berurutan (VidLink dulu)
+ *   /stream?tmdb=550&engine=play&only=2Embed → pemutar tertentu saja
+ *   /stream?tmdb=550&engine=play&force=1     → abaikan cache
+ */
+async function handleStreamPlay(req, res, u, tmdb, type, season, episode) {
+  const only = (u.searchParams.get('only') || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const force = u.searchParams.get('force') === '1';
+
+  try {
+    const hit = await play.extract(tmdb, type, season, episode, { force, engines: only });
+    const out = {
+      sourceId: hit.engine,
+      type: 'file',
+      ttl: Number(process.env.PW_TTL || 3_000),
+      live: true,
+      adBlocked: hit.adBlocked || 0,
+      cached: Boolean(hit.cached),
+      qualities: {
+        auto: {
+          label: 'auto',
+          type: /\.m3u8/.test(hit.url) ? 'hls' : 'mp4',
+          codec: null,
+          size: null, sizeText: null,
+          // URL apa adanya dari pemutar. Perangkat (IP seluler/rumah) yang
+          // mengunduh; server tidak menyentuh video sama sekali.
+          url: hit.url,
+          headers: hit.headers || {},
+          directUrl: null,
+        },
+      },
+      captions: [],
+    };
+    json(res, 200, out);
+  } catch (e) {
+    json(res, 502, { error: e.message, hint: 'pastikan playwright + chromium terpasang' });
+  }
+}
+
 async function handleStream(req, res, u) {
   const tmdb = u.searchParams.get('tmdb');
   const type = (u.searchParams.get('type') || 'movie').toLowerCase();
@@ -204,6 +251,11 @@ async function handleStream(req, res, u) {
   const episode = Number(u.searchParams.get('episode') || 0);
   const multi = u.searchParams.get('multiLang') || 'false';
   if (!tmdb) return json(res, 400, { error: 'tmdb wajib' });
+
+  // Jalur pemutar sungguhan (Chromium) — diminta eksplisit.
+  if (u.searchParams.get('engine') === 'play') {
+    return handleStreamPlay(req, res, u, tmdb, type, season, episode);
+  }
 
   const key = `st:${type}:${tmdb}:${season}:${episode}:${multi}`;
   const hit = cacheGet(key);
@@ -332,6 +384,7 @@ const server = http.createServer(async (req, res) => {
       cache: { size: cache.size, hits: cacheHits, miss: cacheMiss },
       videos: cdn.videoMap.size, subs: cdn.subMap.size,
       proxy: VIDEO_PROXY,
+      play: play.stats(),
       ts: new Date().toISOString(),
     });
   }
