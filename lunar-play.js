@@ -34,6 +34,24 @@ const WAIT_MEDIA = Number(process.env.PW_WAIT_MEDIA || 75_000);
 const TTL = Number(process.env.PW_TTL || 3_000);          // umur cache (detik)
 const LAUNCH_TIMEOUT = Number(process.env.PW_LAUNCH_TIMEOUT || 30_000);
 
+/**
+ * Berapa lama menunggu SETELAH kandidat pertama muncul, untuk memberi
+ * kesempatan play-list HLS ikut tertangkap.
+ *
+ * Halaman pemutar biasanya meminta berkas .mp4 dulu (pratinjau) baru
+ * play-list HLS. Menunggu terlalu lama hanya membuang waktu; menunggu
+ * terlalu singkat membuat kita mengambil .mp4 bertanda tangan yang cepat
+ * tua. Nilai ini diturunkan dari 1200 ms — permintaan HLS menyusul dalam
+ * beberapa ratus milidetik pada pengujian.
+ */
+const SETTLE_MS = Number(process.env.PW_SETTLE_MS || 600);
+
+/**
+ * Berapa lama tidak ada lalu lintas media baru sebelum dianggap selesai.
+ * Begitu halaman tenang, menunggu sampai batas penuh hanya membuang waktu.
+ */
+const IDLE_MS = Number(process.env.PW_IDLE_MS || 4_000);
+
 const UA = process.env.PW_UA
   || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36';
 
@@ -78,13 +96,59 @@ function isHlsUrl(u) {
   return /\.m3u8(\?|$)/i.test(u) || /\/api\/playlist\//i.test(u);
 }
 
-/** Pilih video terbaik dari kandidat (HLS > DASH > mp4). */
+/**
+ * Pilih video terbaik dari kandidat (HLS > DASH > mp4).
+ *
+ * PENTING — master vs anak:
+ * Halaman cinesrc meminta BEBERAPA play-list: satu master yang memuat daftar
+ * varian (1080p, 720p) dan beberapa anak yang hanya memuat segmen satu
+ * varian. Kalau yang diambil anak, pemutar kehilangan pilihan mutu — dan
+ * lebih buruk lagi, anak hanya memuat sebagian film.
+ *
+ * Master tidak bisa dikenali dari bentuk alamatnya (keduanya sama-sama
+ * /api/playlist/<hash>), jadi penilaian dilakukan dari isi respons oleh
+ * peringkatPlaylist() di bawah; di sini hanya urutan kemunculan yang dipakai
+ * sebagai cadangan.
+ */
 function pickVideo(urls) {
   for (const re of VIDEO_PATTERNS) {
     const hit = urls.find((u) => re.test(u) && !NOT_VIDEO.test(u) && !AD_HOSTS.test(u));
     if (hit) return hit;
   }
   return null;
+}
+
+/**
+ * Beri nilai sebuah play-list berdasarkan isinya. Yang lebih tinggi nilainya
+ * yang dipakai.
+ *
+ *   +1000  memuat #EXT-X-STREAM-INF  → master (punya daftar varian)
+ *   +500   memuat #EXT-X-MAP         → anak yang sah (punya inisialisasi)
+ *   +200   memuat #EXT-X-ENDLIST     → daftar lengkap, bukan potongan
+ *   +1 per baris #EXTINF             → makin banyak segmen makin baik
+ *   -1     bukan play-list
+ */
+async function peringkatPlaylist(url, referer, cookie) {
+  try {
+    const r = await fetch(url, {
+      headers: {
+        ...(referer ? { Referer: referer } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
+        'User-Agent': UA,
+      },
+    });
+    if (!r.ok) return -1;
+    const t = await r.text();
+    if (!t.includes('#EXTM3U')) return -1;
+    let skor = 0;
+    if (t.includes('#EXT-X-STREAM-INF')) skor += 1000;
+    if (t.includes('#EXT-X-MAP')) skor += 500;
+    if (t.includes('#EXT-X-ENDLIST')) skor += 200;
+    skor += (t.match(/#EXTINF/g) || []).length;
+    return skor;
+  } catch (_) {
+    return -1;
+  }
 }
 
 /* --------------------------------------------------------------- cache ----- */
@@ -223,18 +287,63 @@ async function sniff(engine, tmdb, type, season, episode, browser) {
     // tidak memberi hasil dan pemutar berikutnya dicoba.
     const t0 = Date.now();
     const stillAlive = () => !page.isClosed();
+    let lastCount = 0;
+    let lastNewAt = Date.now();
+    let lastProbe = 0;
+    let domCur = null;
+
     while (Date.now() - t0 < WAIT_MEDIA) {
-      if (media.length) {
-        // beri jeda singkat supaya m3u8 (bila ada) ikut tertangkap
-        await page.waitForTimeout(1_200).catch(() => {});
+      // Berhenti lebih awal begitu play-list HLS tertangkap — itu hasil
+      // terbaik yang mungkin didapat, tak ada gunanya menunggu sisanya.
+      if (media.some((m) => isHlsUrl(m.url))) {
+        await page.waitForTimeout(SETTLE_MS).catch(() => {});
         break;
       }
+
+      if (media.length) {
+        // Ada kandidat. Beri jeda singkat supaya play-list HLS (bila ada)
+        // ikut tertangkap, lalu selesai. Menunggu lebih lama tidak menambah
+        // mutu hasil — pada pengujian play-list sudah muncul di detik 22
+        // sementara batas penuh 75 detik hanya membuang waktu.
+        await page.waitForTimeout(SETTLE_MS).catch(() => {});
+        break;
+      }
+
       if (!stillAlive()) break;
+
+      // Tiap ~2 detik, periksa elemen <video>. Sebagian halaman hanya
+      // menaruh alamat di situ setelah beberapa saat, dan menunggu buta
+      // sampai batas penuh memboroskan puluhan detik.
+      const now = Date.now();
+      if (now - lastProbe > 2_000) {
+        lastProbe = now;
+        domCur = await page.evaluate(() => {
+          const v = document.querySelector('video');
+          if (!v) return null;
+          return v.currentSrc || v.src || null;
+        }).catch(() => null);
+        if (domCur && /\.m3u8|\.mp4|\/mp\/|sacdn/i.test(domCur)) {
+          media.push({ url: domCur, headers: {} });
+          await page.waitForTimeout(SETTLE_MS).catch(() => {});
+          break;
+        }
+      }
+
+      // Kalau sudah ada lalu lintas media tapi tidak ada yang baru selama
+      // beberapa detik, halaman sudah tenang — tidak perlu menunggu penuh.
+      if (media.length !== lastCount) {
+        lastCount = media.length;
+        lastNewAt = now;
+      } else if (media.length > 0 && now - lastNewAt > IDLE_MS) {
+        break;
+      }
+
       const waited = await page.waitForTimeout(500).then(() => true).catch(() => false);
       if (!waited) break;   // halaman mati → berhenti menunggu
     }
 
     // terakhir: periksa elemen <video> — kadang URL hanya ada di situ
+    if (!media.length && domCur) media.push({ url: domCur, headers: {} });
     if (!media.length) {
       const cur = await page.evaluate(() => {
         const v = document.querySelector('video');
@@ -244,23 +353,52 @@ async function sniff(engine, tmdb, type, season, episode, browser) {
       if (cur) media.push({ url: cur, headers: {} });
     }
 
-    const best = pickVideo(media.map((m) => m.url));
-    if (best) {
-      const m = media.find((x) => x.url === best);
-      // Cookie sesi dipakai proxy HLS: sub-playlist sumber hanya dijawab bila
-      // permintaannya membawa sesi yang sama dengan yang dipakai pemutar.
-      let cookie = '';
-      try {
-        const cs = await ctx.cookies();
-        cookie = cs.map((c) => `${c.name}=${c.value}`).join('; ');
-      } catch (_) { /* cookie opsional */ }
-      hit = {
-        url: best,
-        headers: m ? m.headers : {},
-        engine: engine.name,
-        adBlocked: adBlocked.length,
-        cookie,
-      };
+    // Cookie sesi dipakai proxy HLS: sub-playlist sumber hanya dijawab bila
+    // permintaannya membawa sesi yang sama dengan yang dipakai pemutar.
+    let cookie = '';
+    try {
+      const cs = await ctx.cookies();
+      cookie = cs.map((c) => `${c.name}=${c.value}`).join('; ');
+    } catch (_) { /* cookie opsional */ }
+
+    // Di antara beberapa play-list, ambil yang paling lengkap menurut isinya.
+    // Ini WAJIB: halaman meminta master (berisi daftar varian) dan anak-anak
+    // (berisi segmen satu varian) pada alamat yang bentuknya sama persis.
+    const kandidat = media.map((m) => m.url).filter((u) => isHlsUrl(u));
+    if (kandidat.length) {
+      const nilai = [];
+      for (const u of kandidat) {
+        const m = media.find((x) => x.url === u);
+        nilai.push({
+          url: u,
+          skor: await peringkatPlaylist(u, m && m.headers ? m.headers.referer : '', cookie),
+        });
+      }
+      nilai.sort((a, b) => b.skor - a.skor);
+      if (nilai[0].skor > 0) {
+        const m = media.find((x) => x.url === nilai[0].url);
+        hit = {
+          url: nilai[0].url,
+          headers: m ? m.headers : {},
+          engine: engine.name,
+          adBlocked: adBlocked.length,
+          cookie,
+        };
+      }
+    }
+
+    if (!hit) {
+      const best = pickVideo(media.map((m) => m.url));
+      if (best) {
+        const m = media.find((x) => x.url === best);
+        hit = {
+          url: best,
+          headers: m ? m.headers : {},
+          engine: engine.name,
+          adBlocked: adBlocked.length,
+          cookie,
+        };
+      }
     }
   } finally {
     await ctx.close().catch(() => {});
@@ -291,20 +429,7 @@ async function extract(tmdb, type = 'movie', season = 0, episode = 0, opts = {})
     ? ENGINES.filter((e) => opts.engines.includes(e.name))
     : ENGINES;
 
-  const launchOpts = {
-    headless: true,
-    args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-gpu', '--mute-audio', '--no-first-run', '--no-default-browser-check',
-      '--disable-blink-features=AutomationControlled',
-      '--autoplay-policy=no-user-gesture-required',
-    ],
-    timeout: LAUNCH_TIMEOUT,
-  };
-  const cp = chromiumPath();
-  if (cp) launchOpts.executablePath = cp;
-
-  const browser = await pw.chromium.launch(launchOpts);
+  const browser = await getBrowser(pw);
   const errors = [];
   const got = [];           // semua hasil yang berhasil, untuk dipilih terbaik
   try {
@@ -335,9 +460,92 @@ async function extract(tmdb, type = 'movie', season = 0, episode = 0, opts = {})
     // tidak ada HLS, tapi ada hasil lain (mp4) → pakai yang pertama
     if (got.length) return { ...got[0], cached: false };
   } finally {
-    await browser.close().catch(() => {});
+    // Peramban TIDAK ditutup di sini — ia dipakai ulang oleh permintaan
+    // berikutnya (lihat getBrowser). Membuka Chromium baru tiap film
+    // memakan 3-8 detik; memakai ulang hanya perlu satu tab baru.
+    for (const v of got) { /* hasil disimpan di cache, aman */ }
   }
   throw new Error('semua pemutar gagal — ' + errors.join(' | '));
+}
+
+/* ------------------------------------------------ peramban dipakai ulang --- */
+
+/**
+ * Satu Chromium untuk SEMUA permintaan.
+ *
+ * Sebelumnya tiap permintaan membuka peramban baru lalu menutupnya lagi.
+ * Membuka Chromium memakan 3-8 detik dan itu terjadi SETIAP kali pengguna
+ * berganti film atau episode. Dengan satu peramban yang hidup terus, biaya
+ * itu hanya dibayar sekali; permintaan berikutnya hanya perlu satu tab
+ * (tab baru sekitar 0,3 detik).
+ *
+ * Peramban ditutup sendiri bila tidak dipakai selama BROWSER_IDLE_MS supaya
+ * memori di VPS kecil tidak mengendap.
+ */
+const BROWSER_IDLE_MS = Number(process.env.PW_BROWSER_IDLE_MS || 300_000);
+
+let browserPromise = null;
+let browserRef = null;
+let idleTimer = null;
+
+function launchOpts() {
+  const o = {
+    headless: true,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      '--disable-gpu', '--mute-audio', '--no-first-run', '--no-default-browser-check',
+      '--disable-blink-features=AutomationControlled',
+      '--autoplay-policy=no-user-gesture-required',
+      // Pemakaian ulang peramban membuat timbunan memori lebih mungkin;
+      // batasi supaya VPS tidak kehabisan.
+      '--js-flags=--max-old-space-size=256',
+    ],
+    timeout: LAUNCH_TIMEOUT,
+  };
+  const cp = chromiumPath();
+  if (cp) o.executablePath = cp;
+  return o;
+}
+
+function touchIdle() {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    const b = browserRef;
+    browserRef = null;
+    browserPromise = null;
+    if (b) b.close().catch(() => {});
+  }, BROWSER_IDLE_MS);
+  if (idleTimer.unref) idleTimer.unref();
+}
+
+async function getBrowser(pw) {
+  touchIdle();
+  if (browserRef && browserRef.isConnected()) return browserRef;
+  if (browserPromise) return browserPromise;
+
+  browserPromise = pw.chromium.launch(launchOpts()).then((b) => {
+    browserRef = b;
+    browserPromise = null;
+    // Kalau peramban mati sendiri (crash), bersihkan supaya permintaan
+    // berikutnya membuka yang baru alih-alih memakai yang sudah mati.
+    b.on('disconnected', () => {
+      if (browserRef === b) { browserRef = null; browserPromise = null; }
+    });
+    return b;
+  }).catch((e) => {
+    browserPromise = null;
+    throw e;
+  });
+  return browserPromise;
+}
+
+/** Tutup peramban (dipakai saat mematikan server). */
+async function closeBrowser() {
+  if (idleTimer) clearTimeout(idleTimer);
+  const b = browserRef;
+  browserRef = null;
+  browserPromise = null;
+  if (b) await b.close().catch(() => {});
 }
 
 /** Statistik untuk /health. */
@@ -352,4 +560,4 @@ function stats() {
   };
 }
 
-module.exports = { extract, getCached, putCached, available, stats, chromiumPath, ENGINES, CACHE_FILE };
+module.exports = { extract, getCached, putCached, available, stats, chromiumPath, closeBrowser, ENGINES, CACHE_FILE };
