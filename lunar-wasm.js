@@ -16,10 +16,49 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const https = require('https');
+const http = require('http');
 
 const HERE = __dirname;
 const CHUNKS = path.join(HERE, 'chunks');
 const WASM = path.join(HERE, 'wasm');
+
+/**
+ * GET JSON/text dengan PAKSA IPv4.
+ *
+ * Penting: di banyak VPS, DNS vidlink.pro hanya mengembalikan AAAA (IPv6),
+ * sementara IPv6 tidak jalan. `fetch()` bawaan Node (undici) akan mencoba
+ * IPv6 dan gagal dengan "fetch failed". Kita pakai `family: 4` + `lookup`
+ * untuk memaksa IPv4.
+ */
+function fetchNode(url, headers = {}, timeoutMs = 25000) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const lib = u.protocol === 'http:' ? http : https;
+    const req = lib.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'http:' ? 80 : 443),
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers,
+        family: 4,          // ← paksa IPv4
+        lookup: (host, opts, cb) => {
+          require('dns').lookup(host, { ...opts, family: 4 }, cb);
+        },
+      },
+      (res) => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (data += c));
+        res.on('end', () => resolve({ status: res.statusCode, text: data, headers: res.headers }));
+      },
+    );
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout ' + timeoutMs + 'ms')));
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 let modules = {};
 let reqFull = null;      // webpack require lengkap
@@ -174,7 +213,7 @@ async function init() {
     // bisa dipakai langsung di Node; kita replikasi persis permintaannya.
     async function ie(tok, multiLang, envHeader) {
       const url = 'https://vidlink.pro/api/b/movie/' + tok + '?multiLang=' + (multiLang ? 1 : 0);
-      const res = await fetch(url, {
+      const res = await fetchNode(url, {
         headers: {
           'X-Playback-Environment': envHeader || ENV,
           'Origin': 'https://vidlink.pro',
@@ -182,10 +221,8 @@ async function init() {
           'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
         },
       });
-      if (!res.ok) throw new Error('vidlink HTTP ' + res.status);
-      const json = await res.json();
-      // (0,n.D) di bundle = dekripsi/normalisasi; respons biasanya sudah JSON bersih
-      return json;
+      if (res.status >= 400) throw new Error('vidlink HTTP ' + res.status);
+      return JSON.parse(res.text);
     }
 
     return { sandbox, req, env: ENV, ie };

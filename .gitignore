@@ -1,24 +1,10 @@
-# ==== Node ====
+# dependensi
 node_modules/
-server/cache/
+
+# cache runtime
+cache/
 *.log
 
-# ==== Android / Gradle ====
-android/.gradle/
-android/build/
-android/app/build/
-android/local.properties
-android/.kotlin/
-*.apk
-*.aab
-*.keystore
-!android/debug.keystore
-
-# ==== IDE ====
-.idea/
-*.iml
-.vscode/
-
-# ==== OS ====
+# os
 .DS_Store
 Thumbs.db
