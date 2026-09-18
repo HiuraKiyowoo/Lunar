@@ -105,8 +105,12 @@ function directUrl(url) {
       const v = u.searchParams.get(k);
       if (v) q.set(k, v);
     }
+    // PENTING: prefix /mp/ milik perantara noon, bukan bagian dari CDN.
+    // Kalau tidak dibuang, CDN menjawab 403 (akses ditolak); setelah dibuang
+    // CDN menjawab 200/206 video/mp4.
+    const p = u.pathname.replace(/^\/mp\//, '/');
     const qs = q.toString();
-    return host.replace(/\/$/, '') + u.pathname + (qs ? '?' + qs : '');
+    return host.replace(/\/$/, '') + p + (qs ? '?' + qs : '');
   } catch (_) { return url; }
 }
 
