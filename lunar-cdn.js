@@ -85,6 +85,15 @@ function pipeVideo(req, res, entry, attempt = 0) {
     'Referer': entry.referer || DEFAULT_REFERER,
     'Origin': entry.origin || DEFAULT_ORIGIN,
   };
+
+  // Perantara noon.mooncase.online menjawab 427 Forbidden tanpa header
+  // Client Hints ini. Nilainya sama seperti yang dikirim player VidLink.
+  if (/noon\.mooncase\.online/.test(target.hostname)) {
+    headers['sec-ch-ua'] = '"Chromium";v="131", "Not?A_Brand";v="24", "Google Chrome";v="131"';
+    headers['sec-ch-ua-mobile'] = '?1';
+    headers['sec-ch-ua-platform'] = '"Android"';
+  }
+
   if (req.headers.range) headers['Range'] = req.headers.range;
   if (entry.cookie) headers['Cookie'] = entry.cookie;
 

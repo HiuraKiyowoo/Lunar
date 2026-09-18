@@ -33,6 +33,20 @@ const VERSION = '3.0-perantara';
 
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
+/**
+ * Header tambahan yang WAJIB ada saat menembak perantara noon.mooncase.online.
+ *
+ * Temuan: tanpa tiga header `sec-ch-ua*` ini, perantara menjawab
+ * `427 Forbidden` (15 byte) — kode non-standar buatan mereka sendiri.
+ * Dengan header ini permintaan diteruskan ke CDN (bisa 428/429 biasa).
+ * Nilainya disalin dari permintaan asli player VidLink.
+ */
+const CLIENT_HINTS = {
+  'sec-ch-ua': '"Chromium";v="131", "Not?A_Brand";v="24", "Google Chrome";v="131"',
+  'sec-ch-ua-mobile': '?1',
+  'sec-ch-ua-platform': '"Android"',
+};
+
 /* ---------------------------------------------------------------- utils ---- */
 
 /**
