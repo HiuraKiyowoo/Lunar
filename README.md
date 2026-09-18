@@ -1,8 +1,8 @@
 # 🌙 Lunar — Backend
 
 > Backend untuk client **Lunar**. Menggabungkan katalog **MovieZone** dengan
-> resolver stream **VidLink** (via WebAssembly), lalu menyajikannya sebagai satu
-> API JSON yang bersih.
+> **jalur pemutar HLS** (membuka halaman pemutar dengan Chromium di server),
+> lalu menyajikannya sebagai satu API JSON yang bersih.
 
 ```
 Client (APK / web)
@@ -12,15 +12,48 @@ Client (APK / web)
 │  Lunar Backend (Node.js)                 │
 │                                          │
 │  /api/movies/*   → proxy + cache MovieZone│
-│  /stream         → token WASM + kualitas  │
-│                    + subtitle             │
-│  /v/<id>         → proxy video (Range)    │
+│  /stream?...&engine=play → HLS lewat      │
+│                    Chromium di server     │
+│  /v/<id>         → proxy HLS (playlist +  │
+│                    segmen, Range)         │
 │  /s/<id>.vtt     → subtitle (SRT→VTT)     │
 └──────────────────────────────────────────┘
       │
       ▼
-   CDN video (dengan header yang benar)
+   Sumber HLS (playlist .m3u8 + segmen)
+
+## 🔁 PINDAH VPS — CUMA 3 PERINTAH
+
+Semua yang dibutuhkan ada di repo ini. Di VPS baru (Ubuntu/Debian, sebagai root):
+
+```bash
+apt-get update && apt-get install -y git
+git clone https://github.com/HiuraKiyowoo/Lunar.git
+cd Lunar
+sudo DOMAIN=api-lunar.zone.id bash deploy/install.sh
 ```
+
+`install.sh` mengerjakan semuanya:
+
+1. memasang **Node.js** (kalau belum ada),
+2. memasang **Playwright + Chromium** (wajib untuk jalur pemutar),
+3. memasang **layanan systemd** (`systemctl enable --now lunar`),
+4. menyiapkan **nginx** dengan domainmu (kalau nginx ada),
+5. memeriksa `/health` termasuk bagian `play` (`ready` harus `true`).
+
+**Setelah itu cukup arahkan DNS domain ke IP VPS baru.** APK tidak perlu diubah
+sama sekali — alamat server ada di satu tempat (`Api.BASE`), dan DNS yang
+berpindah.
+
+### Yang TIDAK ada di repo (harus disiapkan sendiri)
+- **HTTPS**: `certbot --nginx -d api-lunar.zone.id`
+- **Penerusan port** di panel NAT: arahkan port **3000** (dan 80/443) ke VPS.
+
+### Kenapa Chromium WAJIB ada
+Jalur `engine=play` membuka halaman pemutar sungguhan untuk menyalin alamat
+videonya. Tanpa Chromium, `/health` menjawab `play.ready: false` dan `/stream`
+jatuh ke jalur lama yang tanda tangannya cepat tua (`428`).
+
 
 ---
 
@@ -65,9 +98,13 @@ Client (APK / web)
 ```bash
 git clone <repo-ini>.git
 cd <repo-ini>
+npm run setup        # npm install + Chromium (perlu ~150 MB)
 node server.js
 ```
 Server jalan di `http://localhost:3000`.
+
+> Lewati `npm run setup` hanya kalau tidak butuh jalur pemutar. Tanpa
+> Chromium, `/health` menjawab `play.ready: false`.
 
 ### Sebagai layanan permanen (systemd)
 ```bash
@@ -101,29 +138,43 @@ curl -s 'http://localhost:3000/api/movies/genres' | head -c 400
 # 4. detail  (movie-550 = Fight Club)
 curl -s 'http://localhost:3000/api/movies/detail/movie-550' | head -c 400
 
-# 5. STREAM — inti dari semuanya
-curl -s 'http://localhost:3000/stream?tmdb=550&type=movie'
+# 5. STREAM — inti dari semuanya (jalur pemutar HLS)
+curl -s 'http://localhost:3000/stream?tmdb=550&type=movie&engine=play'
 ```
 
-Contoh hasil `/stream`:
+Contoh hasil `/stream?engine=play`:
 ```json
 {
-  "sourceId": "mwVault",
-  "type": "file",
-  "ttl": 3600,
+  "sourceId": "VidSrcWiki",
+  "type": "hls",
+  "kind": "hls",
+  "live": true,
+  "ttl": 3000,
+  "note": "HLS lewat proxy server (URI ditulis ulang, cookie sesi disertakan)",
+  "adBlocked": 0,
   "qualities": {
-    "360": { "label": "360p", "url": "/v/261c7a231a8501604445", "sizeText": "196 MB", "codec": "hevc" },
-    "480": { "label": "480p", "url": "/v/ac5979a336ffaf728640", "sizeText": "237 MB", "codec": "hevc" },
-    "720": { "label": "720p", "url": "/v/c9856c84997f1a1b406", "sizeText": "483 MB", "codec": "hevc" }
+    "auto": { "label": "auto", "type": "hls", "url": "/v/2836249ccd610188d4b6" }
   },
-  "captions": [
-    { "language": "English",    "url": "/s/9d2f....vtt" },
-    { "language": "Indonesian", "url": "/s/1a3b....vtt" }
-  ]
+  "captions": []
 }
 ```
 
-> Untuk serial: `/stream?tmdb=1399&type=tv&season=1&episode=1`
+Play-list itu membawa beberapa varian (1080p dan 720p); pemutar memilih
+sendiri. Ambil daftarnya untuk memeriksa:
+
+```bash
+curl -s 'http://localhost:3000/v/<id>'          # daftar varian
+curl -s 'http://localhost:3000/v/<id>.m3u8'     # bentuk ber-ekstensi
+```
+
+> Tanpa `engine=play`, `/stream` memakai jalur lama (berkas `.mp4` bertanda
+> tangan). Tanda tangan itu berumur pendek dan CDN-nya menolak banyak alamat
+> IP, jadi jalur ini hanya cadangan.
+>
+> Untuk serial: `/stream?tmdb=1399&type=tv&season=1&episode=1&engine=play`
+>
+> **Permintaan pertama lambat** (30-75 detik) karena server membuka Chromium.
+> Sesudahnya hasilnya disimpan di server dan langsung dijawab.
 
 ---
 
@@ -204,17 +255,19 @@ curl 'https://lunar.zone.id/stream?tmdb=550&type=movie'
 ```
 .
 ├── server.js         # router utama (API, stream, proxy)
-├── lunar-wasm.js     # menjalankan WASM VidLink → token getAdv()
-├── lunar-cdn.js      # proxy video + subtitle (Range, retry, SRT→VTT)
+├── lunar-play.js     # jalur pemutar: Chromium + penyaring iklan
+├── lunar-hls.js      # proxy play-list & segmen HLS (URI ditulis ulang)
+├── lunar-cdn.js      # proxy berkas utuh + subtitle (Range, SRT→VTT)
+├── lunar-wasm.js     # jalur lama: WASM VidLink → token
 ├── wasm/
-│   ├── fu.wasm           # WASM (Go) 2,4 MB — WAJIB, jangan dihapus
+│   ├── fu.wasm           # WASM (Go) 2,4 MB — dipakai jalur lama
 │   ├── libsodium.js      # modul enkripsi
 │   └── script.js         # loader Emscripten
 ├── chunks/           # modul bundle yang dibutuhkan WASM (20 berkas)
 ├── deploy/
 │   ├── lunar.service # unit systemd
 │   ├── nginx.conf    # contoh reverse proxy
-│   └── install.sh    # pemasang otomatis
+│   └── install.sh    # pemasang otomatis (termasuk Chromium)
 └── package.json
 ```
 

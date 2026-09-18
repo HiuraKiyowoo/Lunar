@@ -1,5 +1,5 @@
 [Unit]
-Description=Lunar Backend (MovieZone + VidLink resolver)
+Description=Lunar Backend (katalog MovieZone + jalur pemutar HLS)
 After=network.target
 
 [Service]
@@ -10,8 +10,13 @@ Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
 Environment=PORT=3000
-# batasi memori biar VPS kecil tetap aman
-MemoryMax=512M
+
+# Jalur pemutar membuka Chromium, jadi batas memori harus cukup untuk Node
+# ditambah satu peramban (Chromium butuh sekitar 250-400 MB saat bekerja).
+# Batas terlalu kecil membuat server dihentikan sistem tepat saat memuat video.
+MemoryMax=1500M
+MemoryHigh=1200M
+
 StandardOutput=append:/var/log/lunar.log
 StandardError=append:/var/log/lunar.log
 
