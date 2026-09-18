@@ -1,0 +1,19 @@
+[Unit]
+Description=Lunar Backend (MovieZone + VidLink resolver)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/lunar-server
+ExecStart=/usr/bin/node /opt/lunar-server/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=PORT=8080
+# batasi memori biar VPS kecil tetap aman
+MemoryMax=512M
+StandardOutput=append:/var/log/lunar.log
+StandardError=append:/var/log/lunar.log
+
+[Install]
+WantedBy=multi-user.target

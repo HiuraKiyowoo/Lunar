@@ -1,0 +1,24 @@
+# ==== Node ====
+node_modules/
+server/cache/
+*.log
+
+# ==== Android / Gradle ====
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+*.apk
+*.aab
+*.keystore
+!android/debug.keystore
+
+# ==== IDE ====
+.idea/
+*.iml
+.vscode/
+
+# ==== OS ====
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#FF080A0C</color>
+    <color name="inkl">#FF0F1215</color>
+    <color name="inke">#FF161B20</color>
+    <color name="gold">#FFF5A623</color>
+    <color name="silver">#FFA0AAB4</color>
+    <color name="dim">#FF505A65</color>
+    <color name="textmain">#FFE8EDF2</color>
+</resources>
