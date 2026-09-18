@@ -47,10 +47,14 @@ function probe(url, headers) {
     const hs = v.headers && Object.keys(v.headers).length ? v.headers : { Referer: 'https://filmboom.top/', Origin: 'https://filmboom.top' };
 
     const r1 = await probe(u.toString(), { Referer: 'https://vidlink.pro/' });
+    // uji DUA aturan: (a) apa adanya dari server, (b) tanpa referer sama sekali
     const r2 = await probe(direct, hs);
+    const r3 = await probe(direct, {});
     console.log(`  ${k}:`);
     console.log(`     perantara : ${r1.status} ${r1.bytes}B ${r1.type||r1.err||''}`);
-    console.log(`     CDN langsung: ${r2.status} ${r2.bytes}B ${r2.type||r2.err||''}   ${r2.status===200||r2.status===206?'✅ JALAN':'❌'}`);
+    const ok = (x) => x.status===200||x.status===206;
+    console.log(`     CDN (headers server): ${r2.status} ${r2.bytes}B ${r2.type||r2.err||''}   ${ok(r2)?'✅ JALAN':'❌'}`);
+    console.log(`     CDN (tanpa referer) : ${r3.status} ${r3.bytes}B ${r3.type||r3.err||''}   ${ok(r3)?'✅ JALAN':'❌'}`);
     console.log(`     URL: ${direct.slice(0,120)}`);
   }
 })();

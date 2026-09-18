@@ -241,12 +241,22 @@ async function handleStream(req, res, u) {
       //
       // `headers` penting: banyak URL CDN butuh Referer/Origin dari sumber
       // aslinya (mis. filmboom.top) — nilai itu sudah diberikan API.
-      const hdrs = { ...(v.headers || {}) };
-      if (!Object.keys(hdrs).length) {
-        // Sebagian sumber tidak memberi header apa pun; pakai nilai bawaan
-        // yang terbukti diterima CDN untuk jalur langsung.
-        hdrs.Referer = 'https://vidlink.pro/';
-        hdrs.Origin = 'https://vidlink.pro';
+      // Headers WAJIB per kelas CDN (hasil uji langsung, 2026-09-18):
+      //   mbVault (bcdnxw.*) → harfiah harus filmboom.top, tanpa itu 429.
+      //   mwVault (bcdn.*)   → harfiah harus TANPA Referer/Origin; justru
+      //                        Referer apa pun (filmboom/vidlink) memicu 429.
+      // Jadi nilai kosong dari API TIDAK boleh diisi default apa pun.
+      const hdrs = {};
+      for (const [hk, hv] of Object.entries(v.headers || {})) {
+        if (hv) hdrs[hk] = String(hv);
+      }
+      const cdnHost = (() => {
+        try { return new URL(v.url).searchParams.get('host') || ''; } catch (_) { return ''; }
+      })();
+      if (!Object.keys(hdrs).length && /bcdnxw\./.test(cdnHost)) {
+        // mbVault: CDN menuntut asal filmboom.
+        hdrs.Referer = 'https://filmboom.top/';
+        hdrs.Origin = 'https://filmboom.top';
       }
 
       qualities[q] = {
