@@ -19,6 +19,7 @@ const wasm = require('./lunar-wasm.js');
 const cdn = require('./lunar-cdn.js');
 const transform = require('./lunar-vidlink-transform.js');
 const play = require('./lunar-play.js');
+const warm = require('./lunar-warm.js');
 const hls = require('./lunar-hls.js');
 
 const PORT = process.env.PORT || 3000;
@@ -214,6 +215,12 @@ async function handleMovieZone(req, res, u) {
 async function handleStreamPlay(req, res, u, tmdb, type, season, episode) {
   const only = (u.searchParams.get('only') || '').split(',').map((x) => x.trim()).filter(Boolean);
   const force = u.searchParams.get('force') === '1';
+
+  // Naikkan prioritas judul ini di antrian pemasak: kalau ada yang membuka
+  // sesi lebih dulu, judul inilah yang paling layak dikerjakan lebih dulu.
+  // Sekaligus antrikan episode lanjutan supaya berpindah episode tidak
+  // menunggu dari nol lagi.
+  try { warm.minta(tmdb, type, season, episode); } catch (_) {}
 
   try {
     const hit = await play.extract(tmdb, type, season, episode, { force, engines: only });
@@ -418,8 +425,19 @@ const server = http.createServer(async (req, res) => {
       proxy: VIDEO_PROXY,
       play: play.stats(),
       hls: hls.stats(),
+      warm: warm.stats(),
       ts: new Date().toISOString(),
     });
+  }
+
+  // pemasak di belakang: lihat keadaan, atau minta masak sekumpulan sekarang
+  if (p === '/warm') {
+    const n = Number(u.searchParams.get('n') || 0);
+    if (n > 0) {
+      return warm.masakSekarang(n).then((r) => json(res, 200, { ok: true, ...r, warm: warm.stats() }))
+        .catch((e) => json(res, 500, { error: e.message }));
+    }
+    return json(res, 200, { ok: true, warm: warm.stats() });
   }
 
   // stream resolver
@@ -452,4 +470,10 @@ wasm.init()
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[lunar] server jalan di :${PORT}`);
+
+  // Masak film terpopuler lebih dulu di belakang layar. Mengambil alamat video
+  // dari halaman pemutar memakan 50-75 detik, dan waktu itu dibayar setiap
+  // kali ada yang membuka judul baru. Dengan memasaknya saat sepi, judul yang
+  // sudah selesai dijawab seketika. Matikan dengan WARM=0.
+  warm.pekerja().catch((e) => console.error('[warm] berhenti:', e.message));
 });

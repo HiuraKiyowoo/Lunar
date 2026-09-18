@@ -10,6 +10,7 @@ cache/
 Thumbs.db
 
 play-cache.json
+warm-queue.json
 extract-cache.json
 sc-cache.json
 sc-cache.json
