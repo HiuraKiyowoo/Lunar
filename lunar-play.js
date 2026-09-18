@@ -29,8 +29,8 @@ const path = require('path');
 
 /* ------------------------------------------------------------- setelan ----- */
 
-const NAV_TIMEOUT = Number(process.env.PW_NAV_TIMEOUT || 60_000);
-const WAIT_MEDIA = Number(process.env.PW_WAIT_MEDIA || 45_000);
+const NAV_TIMEOUT = Number(process.env.PW_NAV_TIMEOUT || 75_000);
+const WAIT_MEDIA = Number(process.env.PW_WAIT_MEDIA || 75_000);
 const TTL = Number(process.env.PW_TTL || 3_000);          // umur cache (detik)
 const LAUNCH_TIMEOUT = Number(process.env.PW_LAUNCH_TIMEOUT || 30_000);
 
@@ -73,6 +73,11 @@ const AD_HOSTS = new RegExp([
   'cloudflareinsights', 'imasdk', 'onclickads', 'clickadu', 'hilltopads',
 ].join('|'), 'i');
 
+/** Apakah URL ini HLS? (play-list m3u8 atau endpoint playlist cinesrc) */
+function isHlsUrl(u) {
+  return /\.m3u8(\?|$)/i.test(u) || /\/api\/playlist\//i.test(u);
+}
+
 /** Pilih video terbaik dari kandidat (HLS > DASH > mp4). */
 function pickVideo(urls) {
   for (const re of VIDEO_PATTERNS) {
@@ -97,16 +102,28 @@ function saveCache() {
   } catch (_) { /* cache sekunder — gagal simpan tidak fatal */ }
 }
 
-const ck = (id, type, s, e) => `${type}:${id}:${s || 0}:${e || 0}`;
+// Kunci cache menyertakan nama pemutar: hasil VidLink (.mp4 bertanda tangan)
+// tidak boleh menutupi hasil VidSrcWiki (HLS). Keduanya punya kelebihan
+// berbeda dan harus bisa dipilih terpisah lewat ?only=.
+const ck = (id, type, s, e, engine) => `${type}:${id}:${s || 0}:${e || 0}:${engine || '*'}`;
 
-function getCached(id, type, s, e) {
-  const it = store[ck(id, type, s, e)];
+function getCached(id, type, s, e, engine) {
+  // utamakan entri pemutar yang diminta; kalau tidak ada, pakai entri mana pun
+  // yang masih berlaku (agar permintaan tanpa `only` tetap cepat).
+  const k = ck(id, type, s, e, engine);
+  let it = store[k];
+  if (!it && engine) {
+    for (const [key, val] of Object.entries(store)) {
+      if (key.startsWith(`${type}:${id}:${s || 0}:${e || 0}:`)) { it = val; break; }
+    }
+  }
   if (!it || !it.exp || it.exp < Date.now()) return null;
+  // hasil HLS selalu lebih diutamakan daripada mp4 bertanda tangan
   return it;
 }
 
-function putCached(id, type, s, e, data) {
-  store[ck(id, type, s, e)] = { ...data, savedAt: Date.now(), exp: Date.now() + TTL * 1000 };
+function putCached(id, type, s, e, data, engine) {
+  store[ck(id, type, s, e, engine)] = { ...data, savedAt: Date.now(), exp: Date.now() + TTL * 1000 };
   saveCache();
 }
 
@@ -222,7 +239,20 @@ async function sniff(engine, tmdb, type, season, episode, browser) {
     const best = pickVideo(media.map((m) => m.url));
     if (best) {
       const m = media.find((x) => x.url === best);
-      hit = { url: best, headers: m ? m.headers : {}, engine: engine.name, adBlocked: adBlocked.length };
+      // Cookie sesi dipakai proxy HLS: sub-playlist sumber hanya dijawab bila
+      // permintaannya membawa sesi yang sama dengan yang dipakai pemutar.
+      let cookie = '';
+      try {
+        const cs = await ctx.cookies();
+        cookie = cs.map((c) => `${c.name}=${c.value}`).join('; ');
+      } catch (_) { /* cookie opsional */ }
+      hit = {
+        url: best,
+        headers: m ? m.headers : {},
+        engine: engine.name,
+        adBlocked: adBlocked.length,
+        cookie,
+      };
     }
   } finally {
     await ctx.close().catch(() => {});
@@ -242,7 +272,8 @@ async function sniff(engine, tmdb, type, season, episode, browser) {
  * @param {object} opts  { force, engines }
  */
 async function extract(tmdb, type = 'movie', season = 0, episode = 0, opts = {}) {
-  const cached = getCached(tmdb, type, season, episode);
+  const only = (opts.engines && opts.engines[0]) || null;
+  const cached = getCached(tmdb, type, season, episode, only);
   if (cached && !opts.force) return { ...cached, cached: true };
 
   const pw = playwright();
@@ -267,6 +298,7 @@ async function extract(tmdb, type = 'movie', season = 0, episode = 0, opts = {})
 
   const browser = await pw.chromium.launch(launchOpts);
   const errors = [];
+  const got = [];           // semua hasil yang berhasil, untuk dipilih terbaik
   try {
     for (const engine of list) {
       try {
@@ -274,18 +306,26 @@ async function extract(tmdb, type = 'movie', season = 0, episode = 0, opts = {})
         if (hit && hit.url) {
           const data = {
             url: hit.url, headers: hit.headers || {}, engine: hit.engine,
+            cookie: hit.cookie || '',
             adBlocked: hit.adBlocked || 0,
             tmdb: String(tmdb), type, season: season || 0, episode: episode || 0,
           };
-          putCached(tmdb, type, season, episode, data);
-          return { ...data, cached: false };
+          putCached(tmdb, type, season, episode, data, hit.engine);
+
+          // HLS menang langsung: tidak ada tanda tangan yang bisa kedaluwarsa
+          // dan segmennya tidak diblokir. Tidak perlu mencoba pemutar lain.
+          if (isHlsUrl(hit.url)) return { ...data, cached: false };
+          got.push(data);
+        } else {
+          errors.push(`${engine.name}: tidak ada URL video`);
         }
-        errors.push(`${engine.name}: tidak ada URL video`);
       } catch (e) {
         errors.push(`${engine.name}: ${e.message}`);
       }
       await new Promise((r) => setTimeout(r, 500));
     }
+    // tidak ada HLS, tapi ada hasil lain (mp4) → pakai yang pertama
+    if (got.length) return { ...got[0], cached: false };
   } finally {
     await browser.close().catch(() => {});
   }
