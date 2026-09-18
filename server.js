@@ -27,6 +27,10 @@ const MZ = 'https://moviezone.web.id';
  * ia membuat sendiri tanda tangan CloudFront (sc / cookie).
  */
 const VIDEO_PROXY = process.env.VIDEO_PROXY || 'https://noon.mooncase.online/';
+
+/** Penanda versi — berguna untuk memastikan server sudah di-restart. */
+const VERSION = '3.0-perantara';
+
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
 /* ---------------------------------------------------------------- utils ---- */
@@ -239,9 +243,12 @@ const server = http.createServer(async (req, res) => {
   // luar biasa — health
   if (p === '/health' || p === '/') {
     return json(res, 200, {
-      ok: true, uptime: Math.round(process.uptime()), node: process.version,
+      ok: true,
+      version: VERSION,
+      uptime: Math.round(process.uptime()), node: process.version,
       cache: { size: cache.size, hits: cacheHits, miss: cacheMiss },
       videos: cdn.videoMap.size, subs: cdn.subMap.size,
+      proxy: VIDEO_PROXY,
       ts: new Date().toISOString(),
     });
   }
