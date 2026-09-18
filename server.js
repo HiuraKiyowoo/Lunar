@@ -5,7 +5,7 @@
  *  2. Resolve stream VidLink (/stream?tmdb=550&type=movie) → kualitas + subtitle
  *  3. Proxy video & subtitle (/v/<id>, /s/<id>)
  *
- * Port: process.env.PORT || 8080
+ * Port: process.env.PORT || 3000
  * Domain: ditaruh di belakang Nginx/Cloudflare (my.zone.id)
  */
 'use strict';
@@ -18,7 +18,7 @@ const path = require('path');
 const wasm = require('./lunar-wasm.js');
 const cdn = require('./lunar-cdn.js');
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 const MZ = 'https://moviezone.web.id';
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 

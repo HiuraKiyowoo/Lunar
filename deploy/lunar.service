@@ -9,7 +9,7 @@ ExecStart=/usr/bin/node /opt/lunar-server/server.js
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
-Environment=PORT=8080
+Environment=PORT=3000
 # batasi memori biar VPS kecil tetap aman
 MemoryMax=512M
 StandardOutput=append:/var/log/lunar.log

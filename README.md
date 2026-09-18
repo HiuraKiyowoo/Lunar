@@ -42,7 +42,7 @@ Client (APK / web)
 | Node.js | **>= 18** (diuji di v22) |
 | OS | Linux (Ubuntu/Debian disarankan) |
 | RAM | minimal 256 MB (dipakai ~150 MB) |
-| Port | `8080` (bisa diubah lewat `PORT`) |
+| Port | `3000` (bisa diubah lewat `PORT`) |
 
 ---
 
@@ -54,7 +54,7 @@ git clone <repo-ini>.git
 cd <repo-ini>
 node server.js
 ```
-Server jalan di `http://localhost:8080`.
+Server jalan di `http://localhost:3000`.
 
 ### Sebagai layanan permanen (systemd)
 ```bash
@@ -76,20 +76,20 @@ sudo bash deploy/install.sh
 
 ```bash
 # 1. status
-curl http://localhost:8080/health
+curl http://localhost:3000/health
 # → {"ok":true,"uptime":..,"cache":{...},"videos":0,"subs":0}
 
 # 2. katalog
-curl -s 'http://localhost:8080/api/movies/trending' | head -c 400
+curl -s 'http://localhost:3000/api/movies/trending' | head -c 400
 
 # 3. daftar genre (27 genre)
-curl -s 'http://localhost:8080/api/movies/genres' | head -c 400
+curl -s 'http://localhost:3000/api/movies/genres' | head -c 400
 
 # 4. detail  (movie-550 = Fight Club)
-curl -s 'http://localhost:8080/api/movies/detail/movie-550' | head -c 400
+curl -s 'http://localhost:3000/api/movies/detail/movie-550' | head -c 400
 
 # 5. STREAM — inti dari semuanya
-curl -s 'http://localhost:8080/stream?tmdb=550&type=movie'
+curl -s 'http://localhost:3000/stream?tmdb=550&type=movie'
 ```
 
 Contoh hasil `/stream`:
@@ -144,7 +144,8 @@ curl 'https://lunar.zone.id/stream?tmdb=550&type=movie'
 ```
 
 > **Di belakang NAT?** Pastikan port **80** & **443** diteruskan.
-> Kalau hanya punya port lain (mis. `18080`), pakai `https://lunar.zone.id:18080`.
+> Karena port yang di-mapping adalah **3000**, arahkan port **3000** (dan 80/443 kalau ada)
+> ke VPS. Kalau mapping-mu hanya 3000 dan tanpa 443, pakai `https://lunar.zone.id:3000`.
 
 ---
 
@@ -180,7 +181,7 @@ curl 'https://lunar.zone.id/stream?tmdb=550&type=movie'
 
 | Nama | Default | Fungsi |
 |---|---|---|
-| `PORT` | `8080` | Port server |
+| `PORT` | `3000` | Port server |
 | `CACHE_MS` | `300000` | Umur cache katalog (ms) |
 
 ---

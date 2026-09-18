@@ -26,11 +26,11 @@ if command -v nginx >/dev/null 2>&1; then
   ln -sf /etc/nginx/sites-available/lunar /etc/nginx/sites-enabled/lunar
   nginx -t && systemctl reload nginx
 else
-  echo "   (nginx belum ada — skip, server tetap jalan di :8080)"
+  echo "   (nginx belum ada — skip, server tetap jalan di :3000)"
 fi
 
 echo "==> 5/5 Cek"
 sleep 3
-curl -s http://127.0.0.1:8080/health || echo "gagal cek health"
+curl -s http://127.0.0.1:3000/health || echo "gagal cek health"
 echo
 echo "SELESAI. Log: journalctl -u lunar -f   /   cat /var/log/lunar.log"
