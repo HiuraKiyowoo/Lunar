@@ -215,15 +215,23 @@ async function sniff(engine, tmdb, type, season, episode, browser) {
   try {
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
 
-    // tunggu sampai kandidat video muncul (maks WAIT_MEDIA)
+    // Tunggu sampai kandidat video muncul (maks WAIT_MEDIA).
+    //
+    // waitForTimeout melempar bila tab/halaman sudah ditutup (redirect iklan,
+    // atau Chromium mati kehabisan memori). Itu BUKAN kegagalan pemutar —
+    // kalau sudah ada kandidat, pakai saja; kalau belum, pemutar ini dianggap
+    // tidak memberi hasil dan pemutar berikutnya dicoba.
     const t0 = Date.now();
+    const stillAlive = () => !page.isClosed();
     while (Date.now() - t0 < WAIT_MEDIA) {
       if (media.length) {
         // beri jeda singkat supaya m3u8 (bila ada) ikut tertangkap
-        await page.waitForTimeout(1_200);
+        await page.waitForTimeout(1_200).catch(() => {});
         break;
       }
-      await page.waitForTimeout(500);
+      if (!stillAlive()) break;
+      const waited = await page.waitForTimeout(500).then(() => true).catch(() => false);
+      if (!waited) break;   // halaman mati → berhenti menunggu
     }
 
     // terakhir: periksa elemen <video> — kadang URL hanya ada di situ
