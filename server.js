@@ -83,6 +83,33 @@ function proxyify(url, register) {
   return '/v/' + register(fixed, 'https://vidlink.pro/', 'https://vidlink.pro');
 }
 
+/**
+ * Ubah URL perantara menjadi URL CDN langsung.
+ *
+ * Perantara noon.mooncase.online menyembunyikan CDN asli di parameter `host`:
+ *   https://noon.mooncase.online/mp/<path>?sign=..&t=..&headers=..&host=https://bcdn...
+ * menjadi
+ *   https://bcdn.../mp/<path>?sign=..&t=..
+ *
+ * Berguna karena perantara menolak IP datacenter, sedangkan sebagian CDN
+ * masih menerima IP seluler secara langsung.
+ */
+function directUrl(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const host = u.searchParams.get('host');
+    if (!host || u.host === new URL(host).host) return url;
+    const q = new URLSearchParams();
+    for (const k of ['sign', 't', 'Policy', 'Signature', 'Key-Pair-Id']) {
+      const v = u.searchParams.get(k);
+      if (v) q.set(k, v);
+    }
+    const qs = q.toString();
+    return host.replace(/\/$/, '') + u.pathname + (qs ? '?' + qs : '');
+  } catch (_) { return url; }
+}
+
 function humanSize(n) {
   if (!n || n <= 0) return null;
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -199,13 +226,41 @@ async function handleStream(req, res, u) {
 
     const qualities = {};
     for (const [q, v] of Object.entries(ts.qualities || {})) {
+      // MODE APK (default): kirim URL CDN MENTAH supaya ExoPlayer di HP
+      // mengambil video langsung dari CDN. IP seluler/rumah tidak diblokir
+      // CDN, sedangkan IP datacenter/VPS diblokir (428/429/427).
+      //
+      // Mode ini menghasilkan pemutaran 100% native:
+      //   · tidak ada WebView
+      //   · tidak ada iklan (iklan VidLink hanya ada di halaman web-nya)
+      //   · tidak ada beban bandwidth di VPS
+      //
+      // `headers` penting: banyak URL CDN butuh Referer/Origin dari sumber
+      // aslinya (mis. filmboom.top) — nilai itu sudah diberikan API.
+      const hdrs = { ...(v.headers || {}) };
+      if (!Object.keys(hdrs).length) {
+        // Sebagian sumber tidak memberi header apa pun; pakai nilai bawaan
+        // yang terbukti diterima CDN untuk jalur langsung.
+        hdrs.Referer = 'https://vidlink.pro/';
+        hdrs.Origin = 'https://vidlink.pro';
+      }
+
       qualities[q] = {
         label: q + 'p',
         type: v.type || 'mp4',
         codec: v.codecName || null,
         size: v.size ? Number(v.size) : null,
         sizeText: v.size ? humanSize(Number(v.size)) : null,
-        url: proxyify(v.url, cdn.register),
+        // Dua mode:
+        //   default (apk)   → URL perantara/CDN mentah + headers; pemutar
+        //                     mengunduh sendiri (IP seluler tidak diblokir).
+        //   ?mode=proxy     → lewat /v/ di server ini (untuk IP datacenter).
+        url: u.searchParams.get('mode') === 'proxy'
+          ? proxyify(v.url, cdn.register)
+          : (v.url || null),
+        headers: hdrs,
+        // URL CDN langsung (hasil bedah URL perantara) sebagai cadangan.
+        directUrl: directUrl(v.url),
       };
     }
 
